@@ -52,15 +52,6 @@ target_compile_definitions(${TARGET} PRIVATE
 
 target_include_directories(${TARGET} PRIVATE
         Source
-        Source/UI
-        Source/AudioEngine/eurorack
-        firmwave
-        firmwave/common
-        firmwave/extern/Eigen
-        firmwave/extern/sml/include/boost
-        firmwave/extern/gsl/include
-        firmwave/extern/etl/include
-        firmwave/extern/etl/include/etl/profiles
         )
 
 target_compile_options(${TARGET}

@@ -6,12 +6,14 @@
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Devices.Bluetooth.h>
+#include <winrt/Windows.Devices.Bluetooth.Advertisement.h>
+#include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
 #include <winrt/Windows.Devices.Enumeration.h>
 #include <winrt/Windows.Devices.Midi.h>
 
 using namespace winrt;
 using namespace winrt::Windows::Foundation;
-using namespace winrt::Windows::Storage::Streams;
+using namespace winrt::Windows::Storage;
 using namespace winrt::Windows::Devices;
 using namespace winrt::Windows::Devices::Enumeration;
 using namespace winrt::Windows::Devices::Radios;
@@ -20,8 +22,7 @@ using namespace winrt::Windows::Devices::Bluetooth;
 using namespace winrt::Windows::Devices::Bluetooth::Advertisement;
 using namespace winrt::Windows::Devices::Bluetooth::GenericAttributeProfile;
 
-#define USE_JUCE_MIDI 1
-
+//======================================================================================================================
 namespace Util {
 using PropertyStore = Collections::IMapView<winrt::hstring, IInspectable>;
 
@@ -42,42 +43,40 @@ static auto getPropertyOr(const PropertyStore& map, const winrt::hstring& key, T
 }
 } // namespace Util
 
+//======================================================================================================================
 class WinRTMidiInput
 {
 public:
-    explicit WinRTMidiInput(String id, const String& winrtId) : identifier(std::move(id))
+    using Callback = std::function<void(const MidiMessage&)>;
+
+    explicit WinRTMidiInput(String id, const String& winrtId, Callback cb)
+            : identifier(std::move(id)),
+              callback(std::move(cb))
     {
-        constexpr auto TimeoutMs = 2000;
+        MidiInPort::FromIdAsync(winrt::to_hstring(winrtId.toStdString())).Completed(
+                [this, winrtId](const IAsyncOperation<MidiInPort>& op, AsyncStatus status)
+                {
+                    if (op.Status() != AsyncStatus::Completed)
+                    {
+                        DBG("Failed to open midi port: " << winrtId);
+                    }
+                    else if (port = op.GetResults(); port != nullptr)
+                    {
+                        DBG("Midi port opened successfully " << String(winrt::to_string(port.DeviceId())));
 
-        const auto op    = MidiInPort::FromIdAsync(winrt::to_hstring(winrtId.toStdString()));
-        const auto start = Time::getMillisecondCounter();
-        auto       now   = start;
+                        port.MessageReceived(
+                                [this](const MidiInPort&, const MidiMessageReceivedEventArgs& args)
+                                {
+                                    const auto bytes = args.Message().RawData();
+                                    const auto msg   = MidiMessage(bytes.data(), bytes.Length());
 
-        while (op.Status() == AsyncStatus::Started && (now - start) <= TimeoutMs)
-        {
-            Thread::sleep(50);
-            now = Time::getMillisecondCounter();
-        }
-
-        if (op.Status() != AsyncStatus::Completed)
-        {
-            if (op.Status() == AsyncStatus::Started && (now - start) >= TimeoutMs)
-                DBG("Timed out waiting for Midi port creation " << winrtId);
-        }
-        else if (port = op.GetResults();  port != nullptr)
-        {
-            DBG("Midi port opened successfully " << String(winrt::to_string(port.DeviceId())));
-
-            port.MessageReceived([this](const MidiInPort&, const MidiMessageReceivedEventArgs& args)
-            {
-                const auto bytes = args.Message().RawData();
-                const auto msg   = MidiMessage(bytes.data(), bytes.Length());
-                DBG("Midi message received: " << msg.getDescription());
-
-                if (messageReceived)
-                    messageReceived(msg);
-            });
-        }
+                                    if (callback)
+                                        callback(msg);
+                                }
+                        );
+                    }
+                }
+        );
     }
 
     ~WinRTMidiInput()
@@ -86,35 +85,141 @@ public:
             port.Close();
     }
 
-    std::function<void(const MidiMessage&)> messageReceived;
-
     [[nodiscard]] const String& getIdentifier() const { return identifier; }
 
 private:
     const String identifier;
 
     MidiInPort port{nullptr};
+
+    Callback callback;
 };
 
-//==============================================================================
+//======================================================================================================================
+struct BleDevice
+{
+    using Callback = std::function<void(std::vector<uint8_t>)>;
+
+    explicit BleDevice(const String& id, Callback cb) : callback(std::move(cb))
+    {
+        jassert(callback != nullptr);
+
+        DBG("Connecting to BLE device: " << id);
+
+        BluetoothLEDevice::FromIdAsync(winrt::to_hstring(id.toStdString())).Completed(
+                [this, id](const IAsyncOperation<BluetoothLEDevice>& sender, AsyncStatus status)
+                {
+                    if (status != AsyncStatus::Completed || sender.GetResults() == nullptr)
+                    {
+                        DBG("Failed to connect to device: " << id);
+                        return;
+                    }
+
+                    device = sender.GetResults();
+                    device.GetGattServicesAsync().Completed({this, &BleDevice::getGattServicesCompleted});
+                }
+        );
+    }
+
+private:
+    //==================================================================================================================
+    void getGattServicesCompleted(const IAsyncOperation<GattDeviceServicesResult>& sender, AsyncStatus status)
+    {
+        if (status != AsyncStatus::Completed)
+        {
+            DBG("Failed to get services");
+            return;
+        }
+
+        constexpr auto uuid_str = L"{65e9296c-8dfb-11ea-bc55-0242ac130003}";
+
+        const auto services = sender.GetResults().Services();
+        const auto it       = std::find_if(begin(services), end(services),
+                [  u = uuid_str](const GattDeviceService& s) { return winrt::to_hstring(s.Uuid()) == u; });
+
+        if (it == end(services))
+        {
+            DBG("Failed to find service: " << String(winrt::to_string(uuid_str)) << ", available services: ");
+            for (const auto& s : services)
+                DBG("  " << String(winrt::to_string(winrt::to_hstring(s.Uuid()))));
+
+            return;
+        }
+
+        service = *it;
+        service.GetCharacteristicsAsync().Completed({this, &BleDevice::getCharacteristicsCompleted});
+    }
+
+    void getCharacteristicsCompleted(const IAsyncOperation<GattCharacteristicsResult>& sender, AsyncStatus status)
+    {
+        if (status != AsyncStatus::Completed)
+        {
+            DBG("Failed to get characteristics");
+            return;
+        }
+
+        constexpr auto uuid_str = L"{65e92bb0-8dfb-11ea-bc55-0242ac130003}";
+
+        const auto chars = sender.GetResults().Characteristics();
+        const auto it    = std::find_if(begin(chars), end(chars),
+                [  u = uuid_str](const GattCharacteristic& c) { return winrt::to_hstring(c.Uuid()) == u; });
+
+        if (it == end(chars))
+        {
+            DBG("Failed to find characteristic: " << String(winrt::to_string(uuid_str)) << ", available characteristics:");
+            for (const auto& c : chars)
+                DBG("  " << String(winrt::to_string(winrt::to_hstring(c.Uuid()))));
+
+            return;
+        }
+
+        charact = *it;
+        charact.ValueChanged({this, &BleDevice::characteristicValueChanged});
+
+        DBG("Got charcteristic successfully: " << String(winrt::to_string(winrt::to_hstring(charact.Uuid()))));
+
+        const auto notify_type = GattClientCharacteristicConfigurationDescriptorValue::Notify;
+        charact.WriteClientCharacteristicConfigurationDescriptorWithResultAsync(notify_type).Completed(
+                [this](const IAsyncOperation<GattWriteResult>& sender, AsyncStatus status)
+                {
+                    if (status != AsyncStatus::Completed || sender.GetResults())
+                    {
+                        DBG("Failed to enable notifications");
+                        return;
+                    }
+
+                    DBG("Notifications enabled successfully for characteristic: " << String(winrt::to_string(winrt::to_hstring(charact.Uuid()))));
+                }
+        );
+    }
+
+    void characteristicValueChanged(const GattCharacteristic& c, const GattValueChangedEventArgs& args)
+    {
+        const auto buf = args.CharacteristicValue();
+
+        std::vector<uint8_t> packet(buf.Length());
+        std::copy(buf.data(), buf.data() + buf.Length(), packet.begin());
+
+        if (callback)
+            callback(std::move(packet));
+    }
+
+    //==================================================================================================================
+    BluetoothLEDevice  device{nullptr};
+    GattDeviceService  service{nullptr};
+    GattCharacteristic charact{nullptr};
+
+    //==================================================================================================================
+    Callback callback;
+};
+
+//======================================================================================================================
 class MainComponent : public Component,
-                      public MidiInputCallback,
                       private Timer,
                       private AsyncUpdater
 {
 public:
-    auto openWinRTMidiInput(const String& identifier) -> std::unique_ptr<WinRTMidiInput>
-    {
-        const auto it = std::find_if(midiDevices.cbegin(), midiDevices.cend(), [&](const auto& d)
-        {
-            return d.containerID == identifier;
-        });
-
-        jassert(it != midiDevices.cend());
-
-        return std::make_unique<WinRTMidiInput>(identifier, it->deviceID);
-    }
-    //==============================================================================
+    //==================================================================================================================
     MainComponent()
             : midiInputWatcher(createMidiDeviceWatcher()),
               bleDeviceWatcher(createBleDeviceWatcher())
@@ -126,36 +231,78 @@ public:
         bleDeviceWatcher.Updated({this, &MainComponent::bleDeviceUpdated});
         bleDeviceWatcher.Removed({this, &MainComponent::bleDeviceRemoved});
 
-        midiMonitor.setMultiLine(true);
-        midiMonitor.setReturnKeyStartsNewLine(false);
-        midiMonitor.setReadOnly(true);
-        midiMonitor.setScrollbarsShown(true);
-        midiMonitor.setCaretVisible(false);
-        midiMonitor.setPopupMenuEnabled(false);
-        midiMonitor.setText({});
-        addAndMakeVisible(midiMonitor);
-
-
         for (auto* w : {&midiInputWatcher, &bleDeviceWatcher})
             w->Start();
 
         startTimer(1000);
-
-        centreWithSize(200, 400);
     }
 
     ~MainComponent() override = default;
 
-    //==============================================================================
+    //==================================================================================================================
     void paint(Graphics& g) override
     {
+        //==============================================================================================================
+        const auto get_name = [this](const String& identifier)
+        {
+            const auto it = std::find_if(midiDeviceInfos.cbegin(), midiDeviceInfos.cend(),
+                    [&](const auto& md) { return identifier == md.containerID; });
+
+            return it == midiDeviceInfos.cend() ? "()" : it->name;
+        };
+
+        const auto get_midi_count = [this](const String& identifier)
+        {
+            const auto it = midiMessageCount.find(identifier);
+
+            return it == midiMessageCount.end() ? 0 : it->second;
+        };
+
+        const auto get_ble_count = [this](const String& identifier)
+        {
+            const auto it = std::find_if(bleDeviceInfos.cbegin(), bleDeviceInfos.cend(),
+                    [&](const auto& kv) { return kv.second.containerID == identifier; });
+
+            if (it != bleDeviceInfos.cend())
+            {
+                const auto c_it = blePacketCount.find(it->first);
+
+                return c_it == blePacketCount.end() ? 0 : c_it->second;
+            }
+
+            return 0;
+        };
+
+        //==============================================================================================================
         g.fillAll(getLookAndFeel().findColour(ResizableWindow::backgroundColourId));
+
+        auto       r = getLocalBounds();
+        const auto w = r.proportionOfWidth(1.0 / 3.0);
+
+        g.setColour(Colours::white);
+        auto hdr = r.removeFromTop(30);
+        for (const auto* t : {"Name", "Midi messages", "BLE packets"})
+            g.drawText(t, hdr.removeFromLeft(w), Justification::left);
+
+        const ScopedLock deviceLock(deviceChanges);
+        const ScopedLock messageLock(midiMessageLock);
+        const ScopedLock packetLock(blePacketLock);
+
+        for (const auto& p : midiPorts)
+        {
+            auto row = r.removeFromTop(30);
+
+            const auto& identifier = p->getIdentifier();
+            const auto name       = get_name(identifier);
+            const auto midi_count = String(get_midi_count(identifier));
+            const auto ble_count  = String(get_ble_count(identifier));
+
+            for (const auto* s : {&name, &midi_count, &ble_count})
+                g.drawText(*s, row.removeFromLeft(w), Justification::left);
+        }
     }
 
-    void resized() override
-    {
-        midiMonitor.setBounds(getLocalBounds());
-    }
+    void resized() override {}
 
     //==================================================================================================================
     void midiDeviceAdded(const DeviceWatcher&, const DeviceInformation& added)
@@ -180,7 +327,7 @@ public:
         DBG("Adding MIDI device: " << info.deviceID << " " << info.containerID << " " << info.name);
 
         const ScopedLock lock(deviceChanges);
-        midiDevices.emplace_back(std::move(info));
+        midiDeviceInfos.emplace_back(std::move(info));
     }
 
     void midiDeviceRemoved(const DeviceWatcher&, const DeviceInformationUpdate& removed)
@@ -190,10 +337,10 @@ public:
         DBG ("Removing MIDI device: " << removedDeviceId);
 
         const ScopedLock lock(deviceChanges);
-        const auto       it = std::remove_if(midiDevices.begin(), midiDevices.end(),
+        const auto       it = std::remove_if(midiDeviceInfos.begin(), midiDeviceInfos.end(),
                 [&](const auto& d) { return d.deviceID == removedDeviceId; });
 
-        midiDevices.erase(it);
+        midiDeviceInfos.erase(it, midiDeviceInfos.end());
     }
 
     //==================================================================================================================
@@ -219,7 +366,7 @@ public:
                                           << " " << (info.isConnected ? "connected" : "disconnected"));
 
                 const ScopedLock lock(deviceChanges);
-                bleDevices.insert_or_assign(deviceID, info);
+                bleDeviceInfos.insert_or_assign(deviceID, info);
             }
         }
     }
@@ -230,8 +377,9 @@ public:
 
         DBG("Removing BLE device: " << removedDeviceId);
 
-        if (bleDevices.contains(removedDeviceId))
-            bleDevices.erase(removedDeviceId);
+        const ScopedLock lock(deviceChanges);
+        if (bleDeviceInfos.contains(removedDeviceId))
+            bleDeviceInfos.erase(removedDeviceId);
     }
 
     void bleDeviceUpdated(const DeviceWatcher&, const DeviceInformationUpdate& updated)
@@ -239,10 +387,6 @@ public:
         DBG("Device updated: " << String(winrt::to_string(updated.Id())));
 
         const auto updatedDeviceId = String(winrt::to_string(updated.Id()));
-
-        DBG("Updated properties:");
-        for (const auto& p : updated.Properties())
-            DBG("  " << String(winrt::to_string(p.Key())));
 
         if (const auto opt = Util::getProperty<bool>(updated.Properties(), L"System.Devices.Aep.IsConnected"); opt.has_value())
         {
@@ -252,80 +396,87 @@ public:
 
             const ScopedLock lock(deviceChanges);
 
-            if (bleDevices.contains(updatedDeviceId))
+            if (bleDeviceInfos.contains(updatedDeviceId))
             {
-                auto& info = bleDevices.at(updatedDeviceId);
+                auto& info = bleDeviceInfos.at(updatedDeviceId);
 
                 if (info.isConnected != is_connected)
+                {
                     DBG("BLE device connection status change: " << updatedDeviceId << " " << info.containerID << " " << (is_connected ? "connected" : "disconnected"));
+
+                    if (is_connected)
+                    {
+                        if (const auto it = bleDevices.find(updatedDeviceId); it == bleDevices.end())
+                        {
+                            const auto callback = [wr = WeakReference(this), updatedDeviceId](auto bytes)
+                            {
+                                if (auto* p = wr.get())
+                                    p->handleIncomingBlePacket(updatedDeviceId, bytes);
+                            };
+
+                            bleDevices.emplace(std::make_pair(updatedDeviceId, std::make_unique<BleDevice>(updatedDeviceId, callback)));
+                        }
+                    }
+                    else if (const auto it = bleDevices.find(updatedDeviceId); it != bleDevices.end())
+                    {
+                        bleDevices.erase(it);
+
+                        const auto& id      = info.containerID;
+
+                        const ScopedLock midiLock(deviceChanges);
+                        const auto       mp = std::find_if(midiPorts.begin(), midiPorts.end(),
+                                [&](const auto& mp) { return mp->getIdentifier() == id; });
+
+                        DBG("Closing midi device: " << id);
+                        midiPorts.erase(mp);
+                    }
+                }
 
                 info.isConnected = is_connected;
             }
         }
     }
 
-    void handleIncomingMidiMessage(MidiInput*, const MidiMessage& msg) override
+    void handleIncomingMidiMessage(const String& deviceIdentifier, const MidiMessage& msg)
     {
         {
             const ScopedLock lock(midiMessageLock);
-            incomingMessages.push_back(msg);
+
+            if (const auto it = midiMessageCount.find(deviceIdentifier); it != midiMessageCount.end())
+                it->second++;
+            else
+                midiMessageCount.insert(std::make_pair(deviceIdentifier, 1));
+        }
+
+        triggerAsyncUpdate();
+    }
+
+    void handleIncomingBlePacket(const String& deviceId, const std::vector<uint8_t>&)
+    {
+        {
+            const ScopedLock lock(blePacketLock);
+
+            if (const auto it = blePacketCount.find(deviceId); it != blePacketCount.end())
+                it->second++;
+            else
+                blePacketCount.insert(std::make_pair(deviceId, 1));
         }
 
         triggerAsyncUpdate();
     }
 
 private:
-    void handleAsyncUpdate() override
-    {
-        std::vector<MidiMessage> messages;
-
-        {
-            const ScopedLock lock(midiMessageLock);
-            messages.swap(incomingMessages);
-        }
-
-        String text = "";
-        for (const auto& msg : messages)
-            text << msg.getDescription() << "\n";
-
-        midiMonitor.insertTextAtCaret(text);
-    }
+    //==================================================================================================================
+    void handleAsyncUpdate() override { repaint(); }
 
     void timerCallback() override
     {
-#if USE_JUCE_MIDI
         const ScopedLock lock(deviceChanges);
-        const auto ds = MidiInput::getAvailableDevices();
 
-        std::vector<MidiDeviceInfo> v(ds.size());
-        std::transform(ds.begin(), ds.end(), v.begin(), [](const auto& d) { return d; });
+        lastQueriedAvailableDevices.resize(midiDeviceInfos.size());
+        std::transform(midiDeviceInfos.cbegin(), midiDeviceInfos.cend(), lastQueriedAvailableDevices.begin(),
+                [](const auto& d) { return MidiDeviceInfo{d.name, d.containerID}; });
 
-        lastQueriedAvailableDevices = std::move(v);
-#else
-        const ScopedLock lock(deviceChanges);
-        lastQueriedAvailableDevices = getAvailableDevices();
-#endif
-
-#if USE_JUCE_MIDI
-        for (const auto&[name, id] : MidiInput::getAvailableDevices())
-        {
-            const auto it = std::find_if(midiInputs.begin(), midiInputs.end(), [id = id](const auto& mp)
-            {
-                return mp->getIdentifier() == id;
-            });
-
-            if (it == midiInputs.end())
-            {
-                DBG("Opening midi device: " << id << " " << name);
-
-                if (auto input = MidiInput::openDevice(id, this); input != nullptr)
-                {
-                    input->start();
-                    midiInputs.push_back(std::move(input));
-                }
-            }
-        }
-#else
         for (const auto&[name, id] : lastQueriedAvailableDevices)
         {
             const auto it = std::find_if(midiPorts.begin(), midiPorts.end(), [id = id](const auto& mp)
@@ -333,69 +484,64 @@ private:
                 return mp->getIdentifier() == id;
             });
 
-            DBG("Open midi ports:");
-            for (const auto& p : midiPorts)
-                DBG("  " << p->getIdentifier());
-
             if (it == midiPorts.end())
             {
                 DBG("Opening midi device: " << id << " " << name << ", num open ports: " << String(midiPorts.size()));
 
-                if (auto port = openWinRTMidiInput(id); port != nullptr)
+                const auto callback = [wr = WeakReference(this), id = id](const MidiMessage& msg)
                 {
-                    port->messageReceived = [wr = WeakReference(this)](const MidiMessage& msg)
-                    {
-                        if (auto* p = wr.get())
-                        {
-                            const ScopedLock lock(p->midiMessageLock);
-                            p->incomingMessages.push_back(msg);
+                    if (auto* p = wr.get())
+                        p->handleIncomingMidiMessage(id, msg);
+                };
 
-                            p->triggerAsyncUpdate();
-                        }
-                    };
-
+                if (auto port = openWinRTMidiInput(id, callback); port != nullptr)
                     midiPorts.push_back(std::move(port));
-                }
             }
         }
-#endif
     }
 
-    [[nodiscard]] std::vector<MidiDeviceInfo> getAvailableDevices() const
+    //==================================================================================================================
+    auto openWinRTMidiInput(const String& identifier, const WinRTMidiInput::Callback& callback) const -> std::unique_ptr<WinRTMidiInput>
     {
-        std::vector<MidiDeviceInfo> devices(midiDevices.size());
-        std::transform(midiDevices.cbegin(), midiDevices.cend(), devices.begin(),
-                [](const auto& d) { return MidiDeviceInfo{d.name, d.containerID}; });
+        const ScopedLock lock(deviceChanges);
 
-        return devices;
+        const auto it = std::find_if(midiDeviceInfos.cbegin(), midiDeviceInfos.cend(), [&](const auto& d)
+        {
+            return d.containerID == identifier;
+        });
+
+        jassert(it != midiDeviceInfos.cend());
+
+        return std::make_unique<WinRTMidiInput>(identifier, it->deviceID, callback);
     }
 
+    //==================================================================================================================
     static DeviceWatcher createMidiDeviceWatcher()
     {
-        const std::vector<winrt::hstring> props{
-                L"System.Devices.ContainerId",
-                L"System.Devices.Aep.ContainerId",
-                L"System.Devices.Aep.IsConnected"
-        };
-
-        return DeviceInformation::CreateWatcher(MidiInPort::GetDeviceSelector(), props, DeviceInformationKind::DeviceInterface);
+        return createWatcher(MidiInPort::GetDeviceSelector(), DeviceInformationKind::DeviceInterface);
     }
 
     static DeviceWatcher createBleDeviceWatcher()
     {
+        // bb7bb05e-5972-42b5-94fc-76eaa7084d49 is the Bluetooth LE protocol ID, by the way...
+        constexpr auto selector = L"System.Devices.Aep.ProtocolId:=\"{bb7bb05e-5972-42b5-94fc-76eaa7084d49}\""
+                                  " AND System.Devices.Aep.IsPaired:=System.StructuredQueryType.Boolean#True";
+
+        return createWatcher(selector, DeviceInformationKind::AssociationEndpoint);
+    }
+
+    static DeviceWatcher createWatcher(const winrt::hstring& selector, DeviceInformationKind kind)
+    {
         const std::vector<winrt::hstring> props{
                 L"System.Devices.ContainerId",
                 L"System.Devices.Aep.ContainerId",
                 L"System.Devices.Aep.IsConnected"
         };
 
-        // bb7bb05e-5972-42b5-94fc-76eaa7084d49 is the Bluetooth LE protocol ID, by the way...
-        constexpr auto selector = L"System.Devices.Aep.ProtocolId:=\"{bb7bb05e-5972-42b5-94fc-76eaa7084d49}\""
-                                  " AND System.Devices.Aep.IsPaired:=System.StructuredQueryType.Boolean#True";
-
-        return DeviceInformation::CreateWatcher(selector, props, DeviceInformationKind::AssociationEndpoint);
+        return DeviceInformation::CreateWatcher(selector, props, kind);
     }
 
+    //==================================================================================================================
     struct WinRTMidiDeviceInfo
     {
         String deviceID{}, containerID{}, name{};
@@ -408,28 +554,28 @@ private:
         bool   isConnected;
     };
 
+    //==================================================================================================================
     CriticalSection                  deviceChanges;
-    std::vector<WinRTMidiDeviceInfo> midiDevices;
-    std::map<String, BleDeviceInfo>  bleDevices;
+    std::vector<WinRTMidiDeviceInfo> midiDeviceInfos;
+    std::map<String, BleDeviceInfo>  bleDeviceInfos;
 
     std::vector<MidiDeviceInfo> lastQueriedAvailableDevices;
 
-#if USE_JUCE_MIDI
-    std::unique_ptr<MidiInput>              midiInput;
-    std::vector<std::unique_ptr<MidiInput>> midiInputs;
-#else
-    std::unique_ptr<WinRTMidiInput>              midiPort;
     std::vector<std::unique_ptr<WinRTMidiInput>> midiPorts;
-#endif
+    std::map<String, std::unique_ptr<BleDevice>> bleDevices;
 
-    TextEditor midiMonitor{};
+    CriticalSection                   midiMessageLock, blePacketLock;
+    std::vector<MidiMessage>          incomingMidiMessages;
+    std::vector<std::vector<uint8_t>> incomingBlePackets;
 
-    CriticalSection          midiMessageLock;
-    std::vector<MidiMessage> incomingMessages;
+    std::map<String, int> midiMessageCount, blePacketCount;
 
-    //==============================================================================
+    //==================================================================================================================
     DeviceWatcher midiInputWatcher, bleDeviceWatcher;
 
+    AudioDeviceManager deviceManager;
+
+    //==================================================================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
     JUCE_DECLARE_WEAK_REFERENCEABLE (MainComponent)
 };

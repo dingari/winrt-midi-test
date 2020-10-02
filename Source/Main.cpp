@@ -45,6 +45,7 @@ private:
 
             setContentOwned (new MainComponent(), false);
             setVisible (true);
+            setSize(600, 200);
         }
 
         void closeButtonPressed() override    { JUCEApplication::getInstance()->systemRequestedQuit(); }
