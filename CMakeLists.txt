@@ -1,6 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
 
-set(CMAKE_OSX_DEPLOYMENT_TARGET "10.11" CACHE STRING "Minimum OS X deployment version")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
@@ -16,19 +15,14 @@ option(JUCE_BUILD_EXTRAS "Build JUCE Extras" OFF)
 option(JUCE_BUILD_EXAMPLES "Build JUCE Examples" OFF)
 
 #find_package(juce CONFIG REQUIRED)
-add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../JUCE" "${CMAKE_CURRENT_BINARY_DIR}/juce")
+add_subdirectory("JUCE")
 
 #adding any custom modules you might have:
 set(TARGET WinRTMidiTest)
 
 juce_add_gui_app(${TARGET}
-        NEEDS_CURL                      TRUE
-        NEEDS_WEB_BROWSER               TRUE
-        MICROPHONE_PERMISSION_ENABLED   TRUE
-        CAMERA_PERMISSION_ENABLED       TRUE
         BLUETOOTH_PERMISSION_ENABLED    TRUE
-        FILE_SHARING_ENABLED            TRUE
-        DOCUMENT_BROWSER_ENABLED        TRUE)
+        )
 
 juce_generate_juce_header(${TARGET})
 

@@ -38,11 +38,6 @@ private:
             setResizable (true, false);
             setResizeLimits (400, 400, 10000, 10000);
 
-//            setBounds ((int) (0.1f * (float) getParentWidth()),
-//                    (int) (0.1f * (float) getParentHeight()),
-//                    jmax (850, (int) (0.5f * (float) getParentWidth())),
-//                    jmax (600, (int) (0.7f * (float) getParentHeight())));
-
             setContentOwned (new MainComponent(), false);
             setVisible (true);
             setSize(600, 200);
