@@ -16,6 +16,9 @@ The behaviour we notice is that data from the most recently connected device str
 
 Below are screenshots of two sample runs (about 10s each) with two devices sending MIDI messages and BLE notifications through a proprietary service. Notice that the "most recently connected" (further down the list) device recevies a bit more MIDI messages, but far more BLE packets.
 
+![alt text](.github/winrt_midi_test_1.PNG "Test run #1 - White (Bluetooth MIDI IN) drops BLE packets")
+![alt text](.github/winrt_midi_test_2.PNG "Test run #2 - Wave (Bluetooth MIDI IN) drops BLE packets")
+
 ## To build & run
 The setup for this example is a bit specific, as you'd need at least two BLE MIDI devices that are actively sending MIDI and BLE notifications through a proprietary service at a pretty high rate. But I'll include this section for completeness.
 
