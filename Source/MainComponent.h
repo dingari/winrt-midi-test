@@ -319,27 +319,31 @@ public:
     //==================================================================================================================
     void midiDeviceAdded(const DeviceWatcher&, const DeviceInformation& added)
     {
-        WinRTMidiDeviceInfo info{};
-        info.deviceID = winrt::to_string(added.Id());
-
-        DBG ("Detected MIDI device: " << info.deviceID);
-
-        if (!added.IsEnabled())
+        const auto get_winrt_device_info = [](const DeviceInformation& info) -> WinRTMidiDeviceInfo
         {
-            DBG ("MIDI device not enabled: " << info.deviceID);
-            return;
-        }
+            String device_id = winrt::to_string(info.Id());
 
-        if (const auto container_id = Util::getProperty<winrt::guid>(added.Properties(), L"System.Devices.ContainerId"))
-            info.containerID = winrt::to_string(winrt::to_hstring(*container_id));
+            if (info.IsEnabled())
+            {
+                const auto container_id = Util::getPropertyOr<winrt::guid>(info.Properties(), L"System.Devices.ContainerId", {});
 
-        info.name      = winrt::to_string(added.Name());
-        info.isDefault = added.IsDefault();
-
-        DBG("Adding MIDI device: " << info.deviceID << " " << info.containerID << " " << info.name);
+                return {
+                        .deviceID = std::move(device_id),
+                        .containerID = winrt::to_string(winrt::to_hstring(container_id)),
+                        .name = winrt::to_string(info.Name()),
+                        .isDefault = info.IsDefault(),
+                };
+            }
+            else
+            {
+                return {.deviceID = std::move(device_id)};
+            }
+        };
 
         const ScopedLock lock(deviceChanges);
-        midiDeviceInfos.emplace_back(std::move(info));
+        const auto& info = midiDeviceInfos.emplace_back(get_winrt_device_info(added));
+
+        DBG("Added MIDI device: " << info.deviceID << " " << info.containerID << " " << info.name);
     }
 
     void midiDeviceRemoved(const DeviceWatcher&, const DeviceInformationUpdate& removed)
