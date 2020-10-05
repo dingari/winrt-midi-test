@@ -131,15 +131,21 @@ private:
             return;
         }
 
-        constexpr auto uuid_str = L"{65e9296c-8dfb-11ea-bc55-0242ac130003}";
+        const auto uuids = {
+                L"{65e9296c-8dfb-11ea-bc55-0242ac130003}",
+                L"{0e5a1523-ede8-4b33-a751-6ce34ec47c00}",
+        };
 
         const auto services = sender.GetResults().Services();
         const auto it       = std::find_if(begin(services), end(services),
-                [  u = uuid_str](const GattDeviceService& s) { return winrt::to_hstring(s.Uuid()) == u; });
+                [&](const GattDeviceService& s)
+                {
+                    return std::any_of(uuids.begin(), uuids.end(), [&](const auto& u) { return winrt::to_hstring(s.Uuid()) == u; });
+                });
 
         if (it == end(services))
         {
-            DBG("Failed to find service: " << String(winrt::to_string(uuid_str)) << ", available services: ");
+            DBG("Failed to find service, available services: ");
             for (const auto& s : services)
                 DBG("  " << String(winrt::to_string(winrt::to_hstring(s.Uuid()))));
 
@@ -158,15 +164,21 @@ private:
             return;
         }
 
-        constexpr auto uuid_str = L"{65e92bb0-8dfb-11ea-bc55-0242ac130003}";
+        const auto uuids = {
+                L"{65e92bb0-8dfb-11ea-bc55-0242ac130003}",
+                L"{0e5a1525-ede8-4b33-a751-6ce34ec47c00}",
+        };
 
         const auto chars = sender.GetResults().Characteristics();
         const auto it    = std::find_if(begin(chars), end(chars),
-                [  u = uuid_str](const GattCharacteristic& c) { return winrt::to_hstring(c.Uuid()) == u; });
+                [&](const GattCharacteristic& c)
+                {
+                    return std::any_of(uuids.begin(), uuids.end(), [&](const auto& u) { return winrt::to_hstring(c.Uuid()) == u; });
+                });
 
         if (it == end(chars))
         {
-            DBG("Failed to find characteristic: " << String(winrt::to_string(uuid_str)) << ", available characteristics:");
+            DBG("Failed to find characteristic, available characteristics:");
             for (const auto& c : chars)
                 DBG("  " << String(winrt::to_string(winrt::to_hstring(c.Uuid()))));
 
