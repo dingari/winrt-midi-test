@@ -589,8 +589,6 @@ private:
     //==================================================================================================================
     DeviceWatcher midiInputWatcher, bleDeviceWatcher;
 
-    AudioDeviceManager deviceManager;
-
     //==================================================================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
     JUCE_DECLARE_WEAK_REFERENCEABLE (MainComponent)
