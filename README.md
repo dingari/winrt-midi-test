@@ -1,6 +1,6 @@
 # WinRT/C++ - Concurrent MIDI/BLE communications
 
-This is a sample application written using the [JUCE](https://github.com/juce-framework/JUCE) framework and the [WinRT/C++](https://en.wikipedia.org/wiki/C%2B%2B/WinRT) library. 
+This is a sample application written using the [JUCE](https://github.com/juce-framework/JUCE) framework (just for GUI and some simple utility) and the [WinRT/C++](https://en.wikipedia.org/wiki/C%2B%2B/WinRT) library. 
 It demonstrates a pretty strange scenario where a connection to more than one [MidiInPort](https://docs.microsoft.com/en-us/uwp/api/windows.devices.midi.midiinport?view=winrt-19041) and their corresponding [BluetoothLEDevice](https://docs.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.bluetoothledevice?view=winrt-19041) instance seems to severly limit the throughput of other such connections.
 
 This sample program is performing roughly these steps:
